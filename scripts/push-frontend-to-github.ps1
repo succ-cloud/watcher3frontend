@@ -28,7 +28,9 @@ $FrontendPaths = @(
   "README.md",
   "public",
   "src",
-  "scripts/push-frontend-to-github.ps1"
+  "scripts/push-frontend-to-github.ps1",
+  "scripts/hostinger-deploy-frontend.sh",
+  "docs/HOSTINGER-FRONTEND.md"
 )
 
 foreach ($path in $FrontendPaths) {
@@ -53,25 +55,27 @@ if ($remoteList -notcontains "frontend") {
 
 function Ensure-PublishRepo {
   if (Test-Path (Join-Path $PublishDir ".git")) {
-    Set-Location $PublishDir
-    git fetch origin 2>$null
-    if (git rev-parse origin/main 2>$null) {
-      git checkout main 2>$null
-      git reset --hard origin/main
+    Push-Location $PublishDir
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    git fetch origin 2>$null | Out-Null
+    if (git ls-remote --heads origin main 2>$null) {
+      git checkout main 2>$null | Out-Null
+      git reset --hard origin/main 2>$null | Out-Null
     } else {
-      git checkout -B main 2>$null
+      git checkout -B main 2>$null | Out-Null
     }
-    Set-Location $Root
+    $ErrorActionPreference = $prevEap
+    Pop-Location
     return
   }
 
-  if (Test-Path $PublishDir) {
-    Remove-Item -Recurse -Force $PublishDir
-  }
-  New-Item -ItemType Directory -Path $PublishDir | Out-Null
+  New-Item -ItemType Directory -Path $PublishDir -Force | Out-Null
   Set-Location $PublishDir
-  git init -b main | Out-Null
-  git remote add origin $FrontendRemoteUrl
+  if (-not (Test-Path ".git")) {
+    git init -b main | Out-Null
+    git remote add origin $FrontendRemoteUrl
+  }
   Set-Location $Root
 }
 
@@ -82,17 +86,27 @@ if (-not $ArchiveArgs.Count) {
   Write-Error "Nothing to publish - no frontend paths found."
 }
 
-Get-ChildItem -Path $PublishDir -Force | Where-Object { $_.Name -ne ".git" } | Remove-Item -Recurse -Force
+$stagingDir = Join-Path $PublishDir "_staging"
+if (Test-Path $stagingDir) {
+  Remove-Item -Recurse -Force $stagingDir -ErrorAction SilentlyContinue
+}
+New-Item -ItemType Directory -Path $stagingDir | Out-Null
 $zipFile = Join-Path $env:TEMP ("wache-frontend-{0}.zip" -f [guid]::NewGuid().ToString("n"))
 try {
   & git -C $Root archive --format=zip -o $zipFile HEAD -- @ArchiveArgs
   if (-not (Test-Path $zipFile)) {
     Write-Error "git archive failed to create $zipFile"
   }
-  Expand-Archive -Path $zipFile -DestinationPath $PublishDir -Force
+  Expand-Archive -Path $zipFile -DestinationPath $stagingDir -Force
+  Get-ChildItem -Path $stagingDir -Force | ForEach-Object {
+    Copy-Item -Path $_.FullName -Destination $PublishDir -Recurse -Force
+  }
 } finally {
   if (Test-Path $zipFile) {
     Remove-Item -Force $zipFile
+  }
+  if (Test-Path $stagingDir) {
+    Remove-Item -Recurse -Force $stagingDir -ErrorAction SilentlyContinue
   }
 }
 
@@ -107,8 +121,9 @@ if (-not $PublishStatus) {
 
 git -c user.email="succ-cloud@users.noreply.github.com" -c user.name="succ-cloud" commit -m $Message
 
-$HasRemoteMain = git rev-parse origin/main 2>$null
-if ($HasRemoteMain) {
+git fetch origin 2>$null
+$remoteMain = git ls-remote --heads origin main 2>$null
+if ($remoteMain) {
   git pull --rebase origin main
   git push origin main
 } else {
